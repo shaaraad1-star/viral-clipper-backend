@@ -1,6 +1,6 @@
 fastapi
 uvicorn
 python-multipart
-yt-dlp
+yt-dlp>=2025.4.30
 faster-whisper
 python-dotenv
