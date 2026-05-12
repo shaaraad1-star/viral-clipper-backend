@@ -255,37 +255,42 @@ async def render_clip(
         # STEP 2: TRIM VIDEO
         # =========================
 
-        trim_cmd = [
-            "ffmpeg",
-            "-y",
+       trim_cmd = [
+    "ffmpeg",
+    "-y",
 
-            "-ss",
-            f"{request.start:.2f}",
+    "-ss",
+    f"{request.start:.2f}",
 
-            "-i",
-            raw_file,
+    "-i",
+    raw_file,
 
-            "-t",
-            f"{duration:.2f}",
+    "-t",
+    f"{duration:.2f}",
 
-            "-c:v",
-            "libx264",
+    "-c:v",
+    "libx264",
 
-            "-c:a",
-            "aac",
+    "-crf",
+    "18",
 
-            "-preset",
-            "veryfast",
+    "-preset",
+    "fast",
 
-            "-movflags",
-            "+faststart",
+    "-c:a",
+    "aac",
 
-            "-f",
-            ff_fmt,
+    "-b:a",
+    "192k",
 
-            clip_file,
-        ]
+    "-movflags",
+    "+faststart",
 
+    "-f",
+    ff_fmt,
+
+    clip_file,
+]
         result = subprocess.run(
             trim_cmd,
             capture_output=True,
