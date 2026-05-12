@@ -1,9 +1,14 @@
 import os
+import shutil
+import tempfile
 import subprocess
+
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+
 import yt_dlp
+
 
 app = FastAPI()
 
@@ -44,7 +49,10 @@ async def resolve_video(
     x_service_secret: str = Header(None)
 ):
     if SERVICE_SECRET and x_service_secret != SERVICE_SECRET:
-        raise HTTPException(status_code=403, detail="Unauthorized")
+        raise HTTPException(
+            status_code=403,
+            detail="Unauthorized"
+        )
 
     ydl_opts = {
         "quiet": True,
@@ -53,7 +61,10 @@ async def resolve_video(
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(request.url, download=False)
+            info = ydl.extract_info(
+                request.url,
+                download=False
+            )
 
         return {
             "title": info.get("title"),
@@ -79,7 +90,10 @@ async def download_video(
     x_service_secret: str = Header(None)
 ):
     if SERVICE_SECRET and x_service_secret != SERVICE_SECRET:
-        raise HTTPException(status_code=403, detail="Unauthorized")
+        raise HTTPException(
+            status_code=403,
+            detail="Unauthorized"
+        )
 
     ydl_opts = {
         "quiet": True,
@@ -88,7 +102,10 @@ async def download_video(
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(request.url, download=False)
+            info = ydl.extract_info(
+                request.url,
+                download=False
+            )
 
     except Exception as e:
         raise HTTPException(
@@ -104,8 +121,11 @@ async def download_video(
         "best[ext=mp4][height<=1080]/best[ext=mp4]/best",
         "-o",
         "-",
+        "--no-playlist",
         "--no-warnings",
         "--quiet",
+        "--extractor-args",
+        "youtube:player_client=android",
         request.url,
     ]
 
@@ -155,7 +175,10 @@ async def render_clip(
     x_service_secret: str = Header(None)
 ):
     if SERVICE_SECRET and x_service_secret != SERVICE_SECRET:
-        raise HTTPException(status_code=403, detail="Unauthorized")
+        raise HTTPException(
+            status_code=403,
+            detail="Unauthorized"
+        )
 
     duration = request.end - request.start
 
@@ -182,89 +205,162 @@ async def render_clip(
     ff_fmt = fmt_map.get(request.format, "mp4")
     mime = mime_map.get(request.format, "video/mp4")
 
-    yt_cmd = [
-        "yt-dlp",
-        "-f",
-        "best[ext=mp4][height<=1080]/best[ext=mp4]/best",
-        "-o",
-        "-",
-        "--no-warnings",
-        "--quiet",
-        request.url,
-    ]
+    tmp_dir = tempfile.mkdtemp(prefix="vc-")
 
-    ff_cmd = [
-        "ffmpeg",
-        "-i",
-        "pipe:0",
-        "-ss",
-        f"{request.start:.2f}",
-        "-t",
-        f"{duration:.2f}",
-
-        # MUCH more reliable than -c copy
-        "-c:v",
-        "libx264",
-        "-c:a",
-        "aac",
-
-        "-f",
-        ff_fmt,
-
-        "-movflags",
-        "+frag_keyframe+empty_moov",
-
-        "-preset",
-        "veryfast",
-
-        "-y",
-        "pipe:1",
-    ]
-
-    yt_proc = subprocess.Popen(
-        yt_cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+    raw_file = os.path.join(tmp_dir, "raw.mp4")
+    clip_file = os.path.join(
+        tmp_dir,
+        f"clip.{request.format}"
     )
 
-    ff_proc = subprocess.Popen(
-        ff_cmd,
-        stdin=yt_proc.stdout,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    try:
 
-    yt_proc.stdout.close()
+        # =========================
+        # STEP 1: DOWNLOAD VIDEO
+        # =========================
 
-    def stream_gen():
-        try:
-            while True:
-                chunk = ff_proc.stdout.read(64 * 1024)
+        dl_cmd = [
+            "yt-dlp",
+            "-f",
+            "best[ext=mp4][height<=1080]/best[ext=mp4]/best",
+            "-o",
+            raw_file,
+            "--no-playlist",
+            "--no-warnings",
+            "--quiet",
+            "--extractor-args",
+            "youtube:player_client=android",
+            request.url,
+        ]
 
-                if not chunk:
-                    break
+        result = subprocess.run(
+            dl_cmd,
+            capture_output=True,
+            timeout=300
+        )
 
-                yield chunk
+        if result.returncode != 0:
+            raise HTTPException(
+                status_code=502,
+                detail="Failed to download video"
+            )
 
-        finally:
-            if ff_proc.stdout:
-                ff_proc.stdout.close()
+        if not os.path.exists(raw_file):
+            raise HTTPException(
+                status_code=502,
+                detail="Downloaded file missing"
+            )
 
-            if ff_proc.stderr:
-                ff_proc.stderr.close()
+        # =========================
+        # STEP 2: TRIM VIDEO
+        # =========================
 
-            ff_proc.wait()
-            yt_proc.wait()
+        trim_cmd = [
+            "ffmpeg",
+            "-y",
 
-    return StreamingResponse(
-        stream_gen(),
-        media_type=mime,
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Content-Disposition":
-                f'attachment; filename="clip.{request.format}"',
-        },
-    )
+            "-ss",
+            f"{request.start:.2f}",
+
+            "-i",
+            raw_file,
+
+            "-t",
+            f"{duration:.2f}",
+
+            "-c:v",
+            "libx264",
+
+            "-c:a",
+            "aac",
+
+            "-preset",
+            "veryfast",
+
+            "-movflags",
+            "+faststart",
+
+            "-f",
+            ff_fmt,
+
+            clip_file,
+        ]
+
+        result = subprocess.run(
+            trim_cmd,
+            capture_output=True,
+            timeout=120
+        )
+
+        if result.returncode != 0:
+            raise HTTPException(
+                status_code=502,
+                detail="Failed to trim clip"
+            )
+
+        if not os.path.exists(clip_file):
+            raise HTTPException(
+                status_code=502,
+                detail="Clip file missing"
+            )
+
+        clip_size = os.path.getsize(clip_file)
+
+        if clip_size == 0:
+            raise HTTPException(
+                status_code=502,
+                detail="Clip is empty"
+            )
+
+        # =========================
+        # STEP 3: STREAM CLIP
+        # =========================
+
+        def stream_gen():
+            try:
+                with open(clip_file, "rb") as f:
+                    while True:
+                        chunk = f.read(64 * 1024)
+
+                        if not chunk:
+                            break
+
+                        yield chunk
+
+            finally:
+                shutil.rmtree(
+                    tmp_dir,
+                    ignore_errors=True
+                )
+
+        return StreamingResponse(
+            stream_gen(),
+            media_type=mime,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Content-Length": str(clip_size),
+                "Content-Disposition":
+                    f'attachment; filename="clip.{request.format}"',
+            },
+        )
+
+    except HTTPException:
+        shutil.rmtree(
+            tmp_dir,
+            ignore_errors=True
+        )
+        raise
+
+    except Exception as e:
+        shutil.rmtree(
+            tmp_dir,
+            ignore_errors=True
+        )
+
+        raise HTTPException(
+            status_code=502,
+            detail=str(e)
+        )
 
 
 # =========================
@@ -277,7 +373,10 @@ async def get_transcript(
     x_service_secret: str = Header(None)
 ):
     if SERVICE_SECRET and x_service_secret != SERVICE_SECRET:
-        raise HTTPException(status_code=403, detail="Unauthorized")
+        raise HTTPException(
+            status_code=403,
+            detail="Unauthorized"
+        )
 
     return {
         "message": "Transcription logic initialized"
