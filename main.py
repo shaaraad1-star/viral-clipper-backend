@@ -214,22 +214,19 @@ async def render_clip(
     )
 
     try:
-
         # =========================
-        # STEP 1: DOWNLOAD VIDEO
+        # STEP 1: DOWNLOAD SPECIFIC SECTON ONLY
         # =========================
-
         dl_cmd = [
             "yt-dlp",
-            "-f",
-            "best[ext=mp4][height<=1080]/best[ext=mp4]/best",
-            "-o",
-            raw_file,
+            "-f", "best[ext=mp4][height<=1080]/best[ext=mp4]/best",
+            "--download-sections", f"*{request.start}-{request.end}",
+            "--force-keyframes-at-cuts",
+            "-o", raw_file,
             "--no-playlist",
             "--no-warnings",
             "--quiet",
-            "--extractor-args",
-            "youtube:player_client=android",
+            "--extractor-args", "youtube:player_client=android",
             request.url,
         ]
 
@@ -242,55 +239,32 @@ async def render_clip(
         if result.returncode != 0:
             raise HTTPException(
                 status_code=502,
-                detail="Failed to download video"
+                detail="Failed to download video section"
             )
 
         if not os.path.exists(raw_file):
             raise HTTPException(
                 status_code=502,
-                detail="Downloaded file missing"
+                detail="Downloaded temporary segment missing"
             )
 
         # =========================
-        # STEP 2: TRIM VIDEO
+        # STEP 2: RE-ENC CODE / CONVERT TO TARGET FORMAT
         # =========================
-
-       trim_cmd = [
-    "ffmpeg",
-    "-y",
-
-    "-ss",
-    f"{request.start:.2f}",
-
-    "-i",
-    raw_file,
-
-    "-t",
-    f"{duration:.2f}",
-
-    "-c:v",
-    "libx264",
-
-    "-crf",
-    "18",
-
-    "-preset",
-    "fast",
-
-    "-c:a",
-    "aac",
-
-    "-b:a",
-    "192k",
-
-    "-movflags",
-    "+faststart",
-
-    "-f",
-    ff_fmt,
-
-    clip_file,
-]
+        trim_cmd = [
+            "ffmpeg",
+            "-y",
+            "-i", raw_file,
+            "-c:v", "libx264",
+            "-crf", "18",
+            "-preset", "fast",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-movflags", "+faststart",
+            "-f", ff_fmt,
+            clip_file,
+        ]
+        
         result = subprocess.run(
             trim_cmd,
             capture_output=True,
@@ -300,13 +274,13 @@ async def render_clip(
         if result.returncode != 0:
             raise HTTPException(
                 status_code=502,
-                detail="Failed to trim clip"
+                detail="Failed to process clip formatting"
             )
 
         if not os.path.exists(clip_file):
             raise HTTPException(
                 status_code=502,
-                detail="Clip file missing"
+                detail="Processed clip file missing"
             )
 
         clip_size = os.path.getsize(clip_file)
@@ -314,24 +288,20 @@ async def render_clip(
         if clip_size == 0:
             raise HTTPException(
                 status_code=502,
-                detail="Clip is empty"
+                detail="Processed file size evaluates to 0"
             )
 
         # =========================
         # STEP 3: STREAM CLIP
         # =========================
-
         def stream_gen():
             try:
                 with open(clip_file, "rb") as f:
                     while True:
                         chunk = f.read(64 * 1024)
-
                         if not chunk:
                             break
-
                         yield chunk
-
             finally:
                 shutil.rmtree(
                     tmp_dir,
@@ -344,24 +314,16 @@ async def render_clip(
             headers={
                 "Access-Control-Allow-Origin": "*",
                 "Content-Length": str(clip_size),
-                "Content-Disposition":
-                    f'attachment; filename="clip.{request.format}"',
+                "Content-Disposition": f'attachment; filename="clip.{request.format}"',
             },
         )
 
     except HTTPException:
-        shutil.rmtree(
-            tmp_dir,
-            ignore_errors=True
-        )
+        shutil.rmtree(tmp_dir, ignore_errors=True)
         raise
 
     except Exception as e:
-        shutil.rmtree(
-            tmp_dir,
-            ignore_errors=True
-        )
-
+        shutil.rmtree(tmp_dir, ignore_errors=True)
         raise HTTPException(
             status_code=502,
             detail=str(e)
